@@ -1,0 +1,5 @@
+{
+  "name": "MarkDown Pro",
+  "description": "A professional local Markdown editor featuring VSCode-like experience, split-view editing, mathematical formula support (KaTeX), and local file system integration.",
+  "requestFramePermissions": []
+}

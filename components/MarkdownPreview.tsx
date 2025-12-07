@@ -49,7 +49,7 @@ const resolvePath = (basePath: string, relativePath: string): string => {
 };
 
 // Component to handle async image loading from local directory
-const LocalImage: React.FC<{ src?: string; alt?: string; rootDirHandle?: FileSystemDirectoryHandle; filePath?: string }> = ({ src, alt, rootDirHandle, filePath, ...props }) => {
+const LocalImage: React.FC<{ src?: string; alt?: string; rootDirHandle?: FileSystemDirectoryHandle; filePath?: string; width?: number | string }> = ({ src, alt, rootDirHandle, filePath, width, ...props }) => {
   const [imgSrc, setImgSrc] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -147,6 +147,7 @@ const LocalImage: React.FC<{ src?: string; alt?: string; rootDirHandle?: FileSys
     <img 
       src={imgSrc} 
       alt={alt} 
+      style={{ width: width ? `${width}px` : undefined }}
       className="max-w-full h-auto rounded-lg shadow-md my-4 border border-gray-200 dark:border-gray-800"
       {...props} 
     />
@@ -175,7 +176,24 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, rootDirHandl
       return <pre className="bg-gray-50 dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 rounded p-4 overflow-x-auto my-4">{children}</pre>;
     },
     img({ src, alt, ...props }: any) {
-      return <LocalImage src={src} alt={alt} rootDirHandle={rootDirHandle} filePath={filePath} {...props} />;
+      let width: number | undefined;
+      let cleanAlt = alt;
+
+      if (alt && typeof alt === 'string') {
+          const parts = alt.split('|');
+          // Check if last part is numeric (Obsidian syntax: alt|width)
+          if (parts.length > 1) {
+              const last = parts[parts.length - 1];
+              // Support "100" or "100x200" (we only use width for now)
+              const match = last.match(/^(\d+)(x\d+)?$/);
+              if (match) {
+                  width = parseInt(match[1]);
+                  cleanAlt = parts.slice(0, -1).join('|');
+              }
+          }
+      }
+
+      return <LocalImage src={src} alt={cleanAlt} width={width} rootDirHandle={rootDirHandle} filePath={filePath} {...props} />;
     },
     a({ href, children }: any) {
         const isInternal = href?.startsWith('#');

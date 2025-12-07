@@ -50,10 +50,27 @@ const LocalImageComponent = (props: any) => {
   const [localWidth, setLocalWidth] = useState<number | string>(width || 'auto');
   const imgRef = useRef<HTMLImageElement>(null);
 
-  // Sync state with props
+  // Sync state with props (if changed externally or by resize)
   useEffect(() => {
-    setLocalWidth(width || 'auto');
+    if (width) {
+        setLocalWidth(width);
+    }
   }, [width]);
+
+  // Initial Parse of Obsidian style alt|width
+  // We do this to display correct size on load WITHOUT triggering a document update (dirty state)
+  useEffect(() => {
+     if (!width && typeof alt === 'string' && alt.includes('|')) {
+         const parts = alt.split('|');
+         const lastPart = parts[parts.length - 1];
+         // Check if last part is numeric (e.g. 100 or 100x200)
+         if (/^\d+(x\d+)?$/.test(lastPart)) {
+             const extracted = parseInt(lastPart, 10);
+             setLocalWidth(extracted);
+             // Intentionally NOT calling updateAttributes here to avoid setting isDirty on file open
+         }
+     }
+  }, []); // Run once on mount
 
   useEffect(() => {
     let objectUrl: string | null = null;
@@ -113,13 +130,25 @@ const LocalImageComponent = (props: any) => {
       setResizing(false);
       
       if (imgRef.current) {
-        updateAttributes({ width: imgRef.current.offsetWidth });
+        const finalWidth = imgRef.current.offsetWidth;
+        
+        // When user actively resizes, we clean the alt text of the pipe suffix
+        // and officially set the width attribute. This marks doc as dirty.
+        let cleanAlt = alt || '';
+        if (typeof cleanAlt === 'string') {
+            cleanAlt = cleanAlt.replace(/\|\d+(x\d+)?$/, '');
+        }
+
+        updateAttributes({ 
+            width: finalWidth,
+            alt: cleanAlt
+        });
       }
     };
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-  }, [updateAttributes]);
+  }, [alt, updateAttributes]);
 
   return (
     <NodeViewWrapper className="relative inline-block my-2 leading-none max-w-full select-none group" style={{ width: localWidth === 'auto' ? 'auto' : `${localWidth}px` }}>
@@ -222,6 +251,38 @@ const WysiwygEditor: React.FC<WysiwygEditorProps> = ({ content, onChange, rootDi
         addOptions() {
             return { ...this.parent?.(), ctx: { rootDirHandle, filePath } };
         },
+        addStorage() {
+            return {
+                markdown: {
+                    serialize(state: any, node: any) {
+                        const alt = node.attrs.alt || '';
+                        const width = node.attrs.width;
+                        const src = node.attrs.src || '';
+                        const title = node.attrs.title;
+
+                        let finalAlt = alt;
+
+                        // If width is present, ensure it's in the alt text: ![alt|width](src)
+                        if (width) {
+                            // Strip existing pipe to avoid duplication
+                            finalAlt = finalAlt.replace(/\|\d+(x\d+)?$/, '');
+                            finalAlt = `${finalAlt}|${Math.round(width)}`;
+                        }
+                        
+                        state.write('![');
+                        state.write(state.esc(finalAlt)); 
+                        state.write('](');
+                        state.write(state.esc(src)); 
+                        if (title) {
+                            state.write(' "');
+                            state.write(state.esc(title));
+                            state.write('"');
+                        }
+                        state.write(')');
+                    }
+                }
+            };
+        },
         addNodeView() {
             return ReactNodeViewRenderer(LocalImageComponent);
         }
@@ -230,11 +291,11 @@ const WysiwygEditor: React.FC<WysiwygEditorProps> = ({ content, onChange, rootDi
           placeholder: 'Start typing...',
       }),
       Markdown.configure({
-        html: true, // Enable HTML so that image dimensions (e.g. <img width="200">) are preserved
+        html: false, // Prefer standard markdown output where possible
       }),
       TabExtension,
     ],
-    content: content, // Initialize content
+    content: content, 
     editorProps: {
         attributes: {
             class: 'prose dark:prose-invert prose-blue max-w-none focus:outline-none min-h-[500px] p-8 pb-[80vh]',

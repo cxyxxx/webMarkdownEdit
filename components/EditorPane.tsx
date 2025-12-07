@@ -1,8 +1,7 @@
 
-
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import Editor, { OnMount } from '@monaco-editor/react';
-import { FileSystemFileHandle, FileSystemDirectoryHandle } from '../types';
+import { FileSystemDirectoryHandle } from '../types';
 
 interface EditorPaneProps {
   fileId: string;
@@ -20,7 +19,7 @@ interface EditorPaneProps {
   filePath?: string;
 }
 
-// Helper to resolve paths (duplicated to avoid external dependency complexity in this refactor)
+// Helper to resolve paths
 const resolvePath = (basePath: string, relativePath: string): string => {
   if (!basePath || relativePath.startsWith('/') || relativePath.startsWith('http') || relativePath.startsWith('data:')) {
       return relativePath.startsWith('/') ? relativePath.substring(1) : relativePath;
@@ -58,12 +57,11 @@ const EditorPane: React.FC<EditorPaneProps> = ({
   const monacoRef = useRef<any>(null);
   const onPasteImageRef = useRef(onPasteImage);
   
-  // Ref for tracking ViewZones and Decorations to avoid race conditions or stale closures
-  const viewZonesMap = useRef<Map<number, string>>(new Map()); // lineNumber -> viewZoneId
+  // Track ViewZone IDs to clean up properly
+  const viewZoneIds = useRef<string[]>([]);
   const decorationsMap = useRef<string[]>([]);
   const imageCache = useRef<Map<string, string>>(new Map()); // src -> blobUrl
 
-  // Keep the ref updated with the latest callback
   useEffect(() => {
     onPasteImageRef.current = onPasteImage;
   }, [onPasteImage]);
@@ -80,23 +78,24 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       padding: { top: 16 },
       fontFamily: "'Fira Code', 'Droid Sans Mono', 'monospace', monospace",
       fontSize: 14,
+      scrollBeyondLastLine: false,
+      glyphMargin: false, // Cleaner look for image widgets
     });
 
-    // Restore cursor position if available
     if (initialCursorPosition) {
         editor.setPosition(initialCursorPosition);
         editor.revealPositionInCenter(initialCursorPosition);
     }
 
-    // Track cursor changes for both position prop and Image Hiding logic
     editor.onDidChangeCursorPosition((e) => {
         if (onCursorChange) {
             onCursorChange(e.position.lineNumber, e.position.column);
         }
-        updateImageDecorations(editor);
+        // Debounce decoration updates slightly to avoid flashing during fast typing
+        requestAnimationFrame(() => updateImageDecorations(editor));
     });
 
-    // Handle Link Click (Ctrl+Click or Double Click)
+    // Link Click Support
     editor.onMouseDown((e) => {
       if (!onFileLinkClick) return;
 
@@ -132,14 +131,24 @@ const EditorPane: React.FC<EditorPaneProps> = ({
 
   // --- Image Preview Logic (Inline Images in Monaco) ---
 
-  // Load image blob from FS
   const loadImageBlob = async (src: string): Promise<string | null> => {
-      if (src.startsWith('http') || src.startsWith('data:')) return src;
+      // Basic cleanup for src in case it has quotes or title
+      // e.g. "image.png" or image.png "title"
+      let cleanSrc = src.trim();
+      const firstSpace = cleanSrc.indexOf(' ');
+      if (firstSpace > 0) {
+          cleanSrc = cleanSrc.substring(0, firstSpace);
+      }
+      cleanSrc = cleanSrc.replace(/['"]/g, '');
+
+      if (cleanSrc.startsWith('http') || cleanSrc.startsWith('data:')) return cleanSrc;
       if (!rootDirHandle) return null;
-      if (imageCache.current.has(src)) return imageCache.current.get(src)!;
+      
+      // Cache check
+      if (imageCache.current.has(cleanSrc)) return imageCache.current.get(cleanSrc)!;
 
       try {
-           const resolvedPath = resolvePath(filePath || '', src);
+           const resolvedPath = resolvePath(filePath || '', cleanSrc);
            const parts = resolvedPath.split('/');
            const fileName = parts.pop();
            if (!fileName) return null;
@@ -151,10 +160,9 @@ const EditorPane: React.FC<EditorPaneProps> = ({
            const fileHandle = await currentDir.getFileHandle(fileName);
            const file = await fileHandle.getFile();
            const url = URL.createObjectURL(file);
-           imageCache.current.set(src, url);
+           imageCache.current.set(cleanSrc, url);
            return url;
       } catch (e) {
-          // console.warn('Failed to load local image in editor', src);
           return null;
       }
   };
@@ -165,98 +173,210 @@ const EditorPane: React.FC<EditorPaneProps> = ({
      if (!model) return;
      const cursorLine = editor.getPosition()?.lineNumber;
 
-     // Regex for images: ![alt](src) matching full line or part
+     // Match ![alt](src)
+     const regex = /!\[(.*?)\]\((.*?)\)/g;
+     
      const matches: any[] = [];
      const lines = model.getLineCount();
-     const regex = /!\[.*?\]\(.*?\)/g;
 
      for (let i = 1; i <= lines; i++) {
+         // If cursor is on this line, DO NOT hide the markdown code.
+         if (i === cursorLine) continue;
+
          const lineContent = model.getLineContent(i);
          let match;
          while ((match = regex.exec(lineContent)) !== null) {
-             // If cursor is on this line, DO NOT hide.
-             if (i === cursorLine) continue;
-
              const startCol = match.index + 1;
              const endCol = startCol + match[0].length;
              
              matches.push({
                  range: new (monacoRef.current!.Range)(i, startCol, i, endCol),
                  options: {
-                     inlineClassName: 'hidden-image-code', // CSS class to make transparent/tiny
+                     inlineClassName: 'hidden-image-code', 
                      description: 'hide-image-source'
                  }
              });
          }
      }
      
-     // Update decorations (replace old ones)
      decorationsMap.current = editor.deltaDecorations(decorationsMap.current, matches);
   };
 
   const scanAndRenderImages = async (editor: any) => {
       const model = editor.getModel();
-      if (!model) return;
+      if (!model || !monacoRef.current) return;
 
       const lines = model.getLineCount();
-      const regex = /!\[.*?\]\((.*?)\)/g;
+      const regex = /!\[(.*?)\]\((.*?)\)/g;
       
       const newViewZones: any[] = [];
-      const imageLines = new Set<number>();
-      
-      // Collect requests first to process them
-      const imageRequests: { lineNumber: number, src: string }[] = [];
+      const imageRequests: { lineNumber: number, src: string, alt: string, range: any }[] = [];
 
+      // First pass: scan all lines
       for (let i = 1; i <= lines; i++) {
           const lineContent = model.getLineContent(i);
           let match;
           while ((match = regex.exec(lineContent)) !== null) {
-              const src = match[1];
-              // Avoid multiple view zones on the same line for now
-              if (!imageLines.has(i)) {
-                  imageLines.add(i);
-                  imageRequests.push({ lineNumber: i, src });
-              }
-              break; 
+              const alt = match[1];
+              const src = match[2];
+              const matchStart = match.index + 1;
+              const matchEnd = matchStart + match[0].length;
+
+              imageRequests.push({ 
+                lineNumber: i, 
+                src, 
+                alt,
+                range: new monacoRef.current!.Range(i, matchStart, i, matchEnd) 
+              });
           }
       }
 
-      // Process images concurrently
+      // Second pass: Load images and prepare ViewZones
       await Promise.all(imageRequests.map(async (req) => {
           const url = await loadImageBlob(req.src);
           if (url) {
+              // Parse width from alt:  "my-image|200" or "my-image|200x100"
+              let widthVal: number | null = null;
+              let cleanAlt = req.alt;
+              const parts = req.alt.split('|');
+              
+              if (parts.length > 1) {
+                   const last = parts[parts.length - 1];
+                   const match = last.match(/^(\d+)(x\d+)?$/);
+                   if (match) {
+                       widthVal = parseInt(match[1]);
+                       cleanAlt = parts.slice(0, -1).join('|');
+                   }
+              }
+
               return new Promise<void>((resolve) => {
+                  const container = document.createElement('div');
+                  container.className = 'monaco-image-widget';
+                  
+                  // Wrapper to handle hover and positioning
+                  const wrapper = document.createElement('div');
+                  wrapper.className = 'monaco-image-wrapper';
+                  
                   const img = document.createElement('img');
                   img.src = url;
-                  img.style.maxWidth = '100%';
-                  img.style.borderRadius = '4px';
-                  img.style.display = 'block';
-                  img.style.marginTop = '4px';
-                  img.style.marginBottom = '4px';
+                  img.className = 'monaco-image-element';
+                  if (widthVal) {
+                      img.style.width = `${widthVal}px`;
+                  } else {
+                      img.style.width = 'auto'; // Default 
+                      img.style.maxWidth = '100%'; 
+                  }
                   
-                  // Wait for load to get dimensions for ViewZone height
+                  // Resize Handle
+                  const handle = document.createElement('div');
+                  handle.className = 'monaco-image-handle';
+                  handle.title = 'Drag to resize';
+
+                  wrapper.appendChild(img);
+                  wrapper.appendChild(handle);
+                  container.appendChild(wrapper);
+
+                  // --- Resize Logic ---
+                  const handleMouseDown = (e: MouseEvent) => {
+                      e.preventDefault();
+                      e.stopPropagation(); // Stop Monaco from stealing the event
+                      
+                      const startX = e.clientX;
+                      const startWidth = img.offsetWidth;
+                      
+                      const onMouseMove = (moveEvent: MouseEvent) => {
+                          const diff = moveEvent.clientX - startX;
+                          const currentW = Math.max(50, startWidth + diff);
+                          img.style.width = `${currentW}px`;
+                      };
+
+                      const onMouseUp = (upEvent: MouseEvent) => {
+                          document.removeEventListener('mousemove', onMouseMove);
+                          document.removeEventListener('mouseup', onMouseUp);
+                          
+                          const diff = upEvent.clientX - startX;
+                          const finalWidth = Math.max(50, startWidth + diff);
+                          
+                          // We need to fetch the LATEST model content because it might have changed
+                          const currentModel = editor.getModel();
+                          if (currentModel) {
+                              const lineContent = currentModel.getLineContent(req.lineNumber);
+                              const lineRegex = /!\[(.*?)\]\((.*?)\)/g;
+                              let m;
+                              let bestMatch = null;
+                              let minDistance = Infinity;
+
+                              // Re-find the exact image match in the line (heuristics for multiple images on line)
+                              while ((m = lineRegex.exec(lineContent)) !== null) {
+                                  const matchStart = m.index + 1;
+                                  const dist = Math.abs(matchStart - req.range.startColumn);
+                                  
+                                  if (m[2] === req.src && dist < minDistance) {
+                                      minDistance = dist;
+                                      bestMatch = m;
+                                  }
+                              }
+
+                              if (bestMatch) {
+                                  const matchStart = bestMatch.index + 1;
+                                  const matchEnd = matchStart + bestMatch[0].length;
+                                  const range = new monacoRef.current!.Range(req.lineNumber, matchStart, req.lineNumber, matchEnd);
+                                  
+                                  // Construct new markdown: ![alt|width](src)
+                                  // Note: if cleanAlt is empty (e.g. ![|100](src)), we preserve that pattern
+                                  const newAlt = `${cleanAlt}|${Math.round(finalWidth)}`;
+                                  const newText = `![${newAlt}](${req.src})`;
+                                  
+                                  editor.executeEdits('image-resize', [{
+                                      range: range,
+                                      text: newText,
+                                      forceMoveMarkers: true
+                                  }]);
+                              }
+                          }
+                      };
+
+                      document.addEventListener('mousemove', onMouseMove);
+                      document.addEventListener('mouseup', onMouseUp);
+                  };
+                  
+                  handle.onmousedown = handleMouseDown as any;
+
                   img.onload = () => {
-                      // Monaco needs height in lines.
-                      // Get current editor line height
                       const lineHeight = editor.getOption(monacoRef.current!.editor.EditorOption.lineHeight) || 19;
                       
-                      // Calculate required lines: (Image Height + Margins) / LineHeight
-                      const totalHeight = img.naturalHeight + 8; // +8 for margins
-                      const heightInLines = Math.ceil(totalHeight / lineHeight);
+                      // Calculate height based on Natural Dimensions and target width.
+                      // This is critical because `img.offsetHeight` is 0 when the element is detached.
+                      let renderedHeight = img.naturalHeight;
+                      if (widthVal) {
+                          renderedHeight = (img.naturalHeight / img.naturalWidth) * widthVal;
+                      } else {
+                          // If auto width, we assume it renders at natural width,
+                          // but capped by editor width essentially.
+                          // Since we can't easily get computed width, we estimate using natural.
+                          // A safe clamp to prevent massive viewzones for 4k images.
+                          const MAX_AUTO_WIDTH = 800; 
+                          if (img.naturalWidth > MAX_AUTO_WIDTH) {
+                               renderedHeight = (img.naturalHeight / img.naturalWidth) * MAX_AUTO_WIDTH;
+                          }
+                      }
+                      
+                      // Ensure minimal height to prevent collapse
+                      renderedHeight = Math.max(20, renderedHeight);
 
-                      const domNode = document.createElement('div');
-                      domNode.appendChild(img);
+                      // Add some padding (e.g. 10px top/bottom total)
+                      const PADDING = 12; 
+                      const heightInLines = Math.ceil((renderedHeight + PADDING) / lineHeight);
 
                       newViewZones.push({
                           afterLineNumber: req.lineNumber,
-                          heightInLines: heightInLines, // Exact height!
-                          domNode: domNode,
-                          suppressMouseDown: true // Allow editing around it
+                          heightInLines: heightInLines, 
+                          domNode: container,
+                          suppressMouseDown: false 
                       });
                       resolve();
                   };
                   
-                  // Handle error or timeout
                   img.onerror = () => resolve();
               });
           }
@@ -264,41 +384,80 @@ const EditorPane: React.FC<EditorPaneProps> = ({
 
       // Apply changes to ViewZones
       editor.changeViewZones((changeAccessor: any) => {
-          viewZonesMap.current.forEach((id) => changeAccessor.removeZone(id));
-          viewZonesMap.current.clear();
+          viewZoneIds.current.forEach((id) => changeAccessor.removeZone(id));
+          viewZoneIds.current = [];
 
           newViewZones.forEach(zone => {
               const id = changeAccessor.addZone(zone);
-              viewZonesMap.current.set(zone.afterLineNumber, id);
+              viewZoneIds.current.push(id);
           });
       });
       
-      // Update hiding decorations
       updateImageDecorations(editor);
   };
 
-  // Re-scan images when content changes (debounced)
   useEffect(() => {
+      // Debounce logic
       const timer = setTimeout(() => {
           if (editorRef.current) {
               scanAndRenderImages(editorRef.current);
           }
-      }, 500); // 500ms debounce
+      }, 500); 
       return () => clearTimeout(timer);
   }, [content, rootDirHandle, filePath]);
 
-  // Inject CSS for hiding image code
+  // Inject CSS Styles
   useEffect(() => {
-      const styleId = 'monaco-image-hide-styles';
+      const styleId = 'monaco-image-styles';
       if (!document.getElementById(styleId)) {
           const style = document.createElement('style');
           style.id = styleId;
           style.innerHTML = `
             .hidden-image-code {
-                color: transparent !important;
-                font-size: 1px !important;
-                letter-spacing: -1px;
+                display: none !important; 
                 opacity: 0;
+            }
+            .monaco-image-widget {
+                display: block;
+                margin: 6px 0; /* Vertical margin handled in height calculation */
+                z-index: 10;
+                user-select: none;
+            }
+            .monaco-image-wrapper {
+                position: relative;
+                display: inline-block;
+                line-height: 0;
+                transition: all 0.2s;
+            }
+            .monaco-image-element {
+                display: block;
+                border-radius: 4px;
+                cursor: default;
+                transition: box-shadow 0.2s;
+            }
+            .monaco-image-wrapper:hover .monaco-image-element {
+                box-shadow: 0 0 0 2px #0e639c; /* VSCode accent color */
+            }
+            .monaco-image-handle {
+                position: absolute;
+                bottom: 5px;
+                right: 5px;
+                width: 10px;
+                height: 10px;
+                background-color: #0e639c;
+                border: 2px solid white;
+                border-radius: 50%;
+                cursor: nwse-resize;
+                opacity: 0;
+                transition: opacity 0.2s, transform 0.1s;
+                z-index: 20;
+                pointer-events: auto;
+            }
+            .monaco-image-wrapper:hover .monaco-image-handle {
+                opacity: 1;
+            }
+            .monaco-image-handle:hover {
+                transform: scale(1.2);
             }
           `;
           document.head.appendChild(style);
@@ -362,7 +521,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                                     }]);
                                }
                            }
-                           // Trigger immediate re-scan
                            setTimeout(() => scanAndRenderImages(editor), 100);
                        } else {
                            const endColumn = currentPos.column + placeholder.length;
@@ -382,7 +540,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       }
   }, []);
 
-  // Handle Scroll to Anchor
   useEffect(() => {
       if (editorRef.current && scrollToAnchor) {
           const editor = editorRef.current;
@@ -405,16 +562,23 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       <Editor
         height="100%"
         theme={theme === 'dark' ? 'vs-dark' : 'light'}
-        path={fileId} // Important for Monaco model caching per file
+        path={fileId}
         defaultLanguage={language}
-        defaultValue={content} // Only used for initial load of a new model
+        defaultValue={content}
         onChange={(value) => onChange(value || '')}
         onMount={handleEditorDidMount}
         options={{
           selectOnLineNumbers: true,
           automaticLayout: true,
           renderWhitespace: 'selection',
-          scrollBeyondLastLine: true,
+          scrollBeyondLastLine: false,
+          scrollbar: {
+              vertical: 'visible',
+              horizontal: 'visible'
+          },
+          minimap: {
+              enabled: true
+          }
         }}
       />
     </div>

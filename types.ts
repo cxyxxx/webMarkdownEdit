@@ -1,3 +1,4 @@
+
 // Standard definitions for File System Access API
 // These are often missing in default TS configs
 export interface FileSystemHandle {
@@ -18,6 +19,7 @@ export interface FileSystemDirectoryHandle extends FileSystemHandle {
   values(): AsyncIterable<FileSystemHandle>;
   getFileHandle(name: string, options?: { create?: boolean }): Promise<FileSystemFileHandle>;
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<FileSystemDirectoryHandle>;
+  removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
 }
 
 export interface FileSystemWritableFileStream extends WritableStream {
@@ -29,6 +31,7 @@ export interface FileSystemWritableFileStream extends WritableStream {
 export interface EditorFile {
   id: string;
   name: string;
+  path?: string; // Relative path from root, e.g., "docs/readme.md"
   handle?: FileSystemFileHandle;
   content: string;
   isDirty: boolean;
@@ -40,6 +43,7 @@ export interface AppState {
   files: EditorFile[];
   activeFileId: string | null;
   sidebarVisible: boolean;
-  previewVisible: boolean;
+  viewMode: 'editor' | 'split' | 'preview' | 'wysiwyg';
+  theme: 'dark' | 'light';
   rootDirHandle?: FileSystemDirectoryHandle; // Added for folder support
 }

@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { 
   FileText, 
@@ -10,7 +11,23 @@ import {
   MoreVertical,
   Split,
   Maximize2,
-  File
+  File,
+  FolderPlus,
+  Trash2,
+  RefreshCw,
+  CornerUpLeft,
+  Edit2,
+  Clock,
+  ArrowRight,
+  History,
+  Star,
+  Home,
+  LogOut,
+  PenTool,
+  Eye,
+  Type,
+  Sun,
+  Moon
 } from 'lucide-react';
 
 // Exporting icons for easy import in other files
@@ -25,5 +42,21 @@ export const Icons = {
   MoreVertical,
   Split,
   Maximize2,
-  File
+  File,
+  FolderPlus,
+  Trash2,
+  RefreshCw,
+  CornerUpLeft,
+  Edit: Edit2,
+  Clock,
+  ArrowRight,
+  History,
+  Star,
+  Home,
+  LogOut,
+  PenTool,
+  Eye,
+  Type,
+  Sun,
+  Moon
 };

@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useCallback } from 'react';
 import Editor, { OnMount } from '@monaco-editor/react';
 import { FileSystemDirectoryHandle } from '../types';
@@ -90,6 +91,10 @@ const EditorPane: React.FC<EditorPaneProps> = ({
         if (onCursorChange) {
             onCursorChange(e.position.lineNumber, e.position.column);
         }
+    });
+
+    // Automatically hide image source code whenever content changes
+    editor.onDidChangeModelContent(() => {
         requestAnimationFrame(() => updateImageDecorations(editor));
     });
 
@@ -166,7 +171,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
      if (!editor) return;
      const model = editor.getModel();
      if (!model) return;
-     const cursorLine = editor.getPosition()?.lineNumber;
 
      const regex = /!\[(.*?)\]\((.*?)\)/g;
      
@@ -174,14 +178,13 @@ const EditorPane: React.FC<EditorPaneProps> = ({
      const lines = model.getLineCount();
 
      for (let i = 1; i <= lines; i++) {
-         if (i === cursorLine) continue;
-
          const lineContent = model.getLineContent(i);
          let match;
          while ((match = regex.exec(lineContent)) !== null) {
              const startCol = match.index + 1;
              const endCol = startCol + match[0].length;
              
+             // Always hide the source code, regardless of cursor position
              matches.push({
                  range: new (monacoRef.current!.Range)(i, startCol, i, endCol),
                  options: {
@@ -200,24 +203,41 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       if (!model || !monacoRef.current) return;
 
       const lines = model.getLineCount();
+      // Regex to capture markdown images: ![alt](src)
       const regex = /!\[(.*?)\]\((.*?)\)/g;
       
-      const newViewZones: any[] = [];
-      const imageRequests: { lineNumber: number, src: string, alt: string }[] = [];
+      // Store object wrapper { zone, ref } where ref will be populated with ID later
+      const newViewZones: { zone: any, ref: { id: string | null } }[] = [];
+      const imageRequests: { lineNumber: number, src: string, alt: string, isFirstOnPureLine: boolean }[] = [];
 
       for (let i = 1; i <= lines; i++) {
           const lineContent = model.getLineContent(i);
+          const lineMatches: any[] = [];
           let match;
+          
+          // Reset regex
+          regex.lastIndex = 0;
           while ((match = regex.exec(lineContent)) !== null) {
-              const alt = match[1];
-              const src = match[2];
-              
+              lineMatches.push(match);
+          }
+          
+          if (lineMatches.length === 0) continue;
+
+          // Check if line contains ONLY images (ignoring whitespace)
+          // This allows us to collapse the line height for pure image lines
+          let remainingText = lineContent;
+          lineMatches.forEach(m => { remainingText = remainingText.replace(m[0], ''); });
+          const isPureLine = remainingText.trim() === '';
+
+          lineMatches.forEach((m, index) => {
               imageRequests.push({ 
                 lineNumber: i, 
-                src, 
-                alt
+                src: m[2], 
+                alt: m[1],
+                // If it's a pure image line, the first image absorbs the line height
+                isFirstOnPureLine: isPureLine && (index === 0)
               });
-          }
+          });
       }
 
       await Promise.all(imageRequests.map(async (req) => {
@@ -239,12 +259,25 @@ const EditorPane: React.FC<EditorPaneProps> = ({
               return new Promise<void>((resolve) => {
                   const container = document.createElement('div');
                   container.className = 'monaco-image-widget';
-                  
+                  // Apply theme-based background to mask the underlying line if we pull it up
+                  container.classList.add('bg-white', 'dark:bg-[#1e1e1e]');
+
                   // Main Wrapper - Focusable for Selection
                   const wrapper = document.createElement('div');
                   wrapper.className = 'monaco-image-wrapper';
                   wrapper.tabIndex = 0; // Make focusable
                   
+                  // Ref to store zone ID later, used in resize handler
+                  const zoneRef = { id: null as string | null };
+                  
+                  // ViewZone Configuration
+                  const viewZone: any = {
+                      afterLineNumber: req.lineNumber,
+                      heightInLines: 0, // Calculated on load
+                      domNode: container,
+                      suppressMouseDown: false 
+                  };
+
                   // Helper to find current range in case of edits
                   const getLatestRangeAndText = () => {
                       const currentModel = editor.getModel();
@@ -269,40 +302,39 @@ const EditorPane: React.FC<EditorPaneProps> = ({
 
                   // --- Keyboard Handling (Copy/Cut/Delete/Nav) ---
                   wrapper.onkeydown = (e) => {
-                      // Only handle if this element is focused
                       if (document.activeElement !== wrapper) return;
 
                       const isCmd = e.ctrlKey || e.metaKey;
                       const key = e.key.toLowerCase();
 
-                      // Navigation Back to Editor
                       if (key === 'arrowdown') {
                           e.preventDefault();
                           editor.focus();
-                          // Move cursor to next line if possible
                           const nextLine = Math.min(model.getLineCount(), req.lineNumber + 1);
                           editor.setPosition({ lineNumber: nextLine, column: 1 });
                       }
                       if (key === 'arrowup') {
                           e.preventDefault();
                           editor.focus();
-                          // Move cursor to previous line (or same line start to reveal code)
                           const prevLine = Math.max(1, req.lineNumber - 1);
                           editor.setPosition({ lineNumber: prevLine, column: 1 });
                       }
+                      
+                      if (key === 'escape') {
+                          e.preventDefault();
+                          editor.focus();
+                      }
 
-                      // Delete
                       if (e.key === 'Delete' || e.key === 'Backspace') {
                           e.preventDefault();
                           e.stopPropagation();
                           const info = getLatestRangeAndText();
                           if (info) {
                               editor.executeEdits('image-delete', [{ range: info.range, text: "", forceMoveMarkers: true }]);
-                              editor.focus(); // Return focus to editor
+                              editor.focus(); 
                           }
                       }
 
-                      // Copy
                       if (isCmd && key === 'c') {
                           e.preventDefault();
                           e.stopPropagation();
@@ -312,7 +344,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                           }
                       }
 
-                      // Cut
                       if (isCmd && key === 'x') {
                           e.preventDefault();
                           e.stopPropagation();
@@ -325,11 +356,12 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                       }
                   };
 
-                  // Click to focus
-                  wrapper.onclick = (e) => {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      wrapper.focus();
+                  wrapper.onfocus = () => {
+                      requestAnimationFrame(() => updateImageDecorations(editor));
+                  };
+                  
+                  wrapper.onmousedown = (e) => {
+                      e.stopPropagation(); 
                   };
 
                   const img = document.createElement('img');
@@ -350,35 +382,61 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                   wrapper.appendChild(handle);
                   container.appendChild(wrapper);
 
-                  // --- Resize Logic ---
                   const handleMouseDown = (e: MouseEvent) => {
                       e.preventDefault();
                       e.stopPropagation(); 
-                      
-                      // Focus the wrapper on resize start too
                       wrapper.focus();
-
                       const startX = e.clientX;
                       const startWidth = img.offsetWidth;
+                      const aspectRatio = img.naturalHeight / img.naturalWidth;
                       
+                      // Constants for real-time layout update
+                      const lineHeight = editor.getOption(monacoRef.current!.editor.EditorOption.lineHeight) || 19;
+                      const PADDING = 12;
+                      
+                      let animationFrame: number;
+
                       const onMouseMove = (moveEvent: MouseEvent) => {
-                          const diff = moveEvent.clientX - startX;
-                          const currentW = Math.max(50, startWidth + diff);
-                          img.style.width = `${currentW}px`;
+                          if (animationFrame) cancelAnimationFrame(animationFrame);
+                          
+                          animationFrame = requestAnimationFrame(() => {
+                              const diff = moveEvent.clientX - startX;
+                              const currentW = Math.max(50, startWidth + diff);
+                              img.style.width = `${currentW}px`;
+                              
+                              // Real-time Layout Update
+                              if (zoneRef.id) {
+                                  const renderedHeight = currentW * aspectRatio;
+                                  let heightDeduction = 0;
+                                  
+                                  if (req.isFirstOnPureLine) {
+                                      heightDeduction = lineHeight;
+                                  }
+
+                                  const heightInLines = Math.max(0.1, (renderedHeight + PADDING - heightDeduction) / lineHeight);
+                                  
+                                  // Update viewZone config object
+                                  viewZone.heightInLines = heightInLines;
+                                  
+                                  // Trigger layout update in Monaco
+                                  editor.changeViewZones((accessor: any) => {
+                                      accessor.layoutZone(zoneRef.id);
+                                  });
+                              }
+                          });
                       };
 
                       const onMouseUp = (upEvent: MouseEvent) => {
                           document.removeEventListener('mousemove', onMouseMove);
                           document.removeEventListener('mouseup', onMouseUp);
+                          if (animationFrame) cancelAnimationFrame(animationFrame);
                           
                           const diff = upEvent.clientX - startX;
                           const finalWidth = Math.max(50, startWidth + diff);
-                          
                           const info = getLatestRangeAndText();
                           if (info) {
                               const newAlt = `${cleanAlt}|${Math.round(finalWidth)}`;
                               const newText = `![${newAlt}](${req.src})`;
-                              
                               editor.executeEdits('image-resize', [{
                                   range: info.range,
                                   text: newText,
@@ -386,7 +444,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                               }]);
                           }
                       };
-
                       document.addEventListener('mousemove', onMouseMove);
                       document.addEventListener('mouseup', onMouseUp);
                   };
@@ -405,17 +462,27 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                                renderedHeight = (img.naturalHeight / img.naturalWidth) * MAX_AUTO_WIDTH;
                           }
                       }
-                      
                       renderedHeight = Math.max(20, renderedHeight);
-                      const PADDING = 12; 
-                      const heightInLines = Math.ceil((renderedHeight + PADDING) / lineHeight);
+                      const PADDING = 12;
 
-                      newViewZones.push({
-                          afterLineNumber: req.lineNumber,
-                          heightInLines: heightInLines, 
-                          domNode: container,
-                          suppressMouseDown: false 
-                      });
+                      // Logic to hide the underlying line if it's a "Pure Image Line"
+                      let marginTop = 0;
+                      let heightDeduction = 0;
+                      
+                      if (req.isFirstOnPureLine) {
+                          // Pull the image up by one line height to cover the empty text line
+                          marginTop = -lineHeight;
+                          // Reduce the reserved space because we are consuming the line's space
+                          heightDeduction = lineHeight;
+                          container.style.marginTop = `${marginTop}px`;
+                      }
+
+                      // Calculate required height in lines, accounting for the deduction
+                      const heightInLines = Math.max(0.1, (renderedHeight + PADDING - heightDeduction) / lineHeight);
+
+                      viewZone.heightInLines = heightInLines;
+                      
+                      newViewZones.push({ zone: viewZone, ref: zoneRef });
                       resolve();
                   };
                   
@@ -428,8 +495,10 @@ const EditorPane: React.FC<EditorPaneProps> = ({
           viewZoneIds.current.forEach((id) => changeAccessor.removeZone(id));
           viewZoneIds.current = [];
 
-          newViewZones.forEach(zone => {
-              const id = changeAccessor.addZone(zone);
+          newViewZones.forEach(item => {
+              // Add zone and store the ID in the shared ref object for the event handler
+              const id = changeAccessor.addZone(item.zone);
+              item.ref.id = id;
               viewZoneIds.current.push(id);
           });
       });
@@ -455,47 +524,43 @@ const EditorPane: React.FC<EditorPaneProps> = ({
           style.innerHTML = `
             .hidden-image-code {
                 color: transparent !important;
-                font-size: 0.1px !important;
+                font-size: 0px !important;
                 letter-spacing: -1px !important;
-                /* Avoid display: none to ensure cursor mechanics work, but make it effectively invisible */
+                display: none !important;
             }
             .monaco-image-widget {
                 display: block;
                 margin: 6px 0;
                 z-index: 10;
                 user-select: none;
+                /* Background is handled by utility classes in TSX for theme support */
             }
             .monaco-image-wrapper {
                 position: relative;
                 display: inline-block;
                 line-height: 0;
-                transition: all 0.1s;
+                transition: border-color 0.1s, box-shadow 0.1s; /* Optimized transition for performance */
                 border-radius: 4px;
-                outline: none; /* Default outline removal */
+                outline: none; 
                 cursor: default;
+                border: 2px solid transparent; 
             }
             .monaco-image-element {
                 display: block;
                 border-radius: 4px;
                 cursor: pointer;
-                transition: box-shadow 0.2s;
             }
-            .monaco-image-wrapper:hover .monaco-image-element {
-                box-shadow: 0 0 0 2px #0e639c;
-            }
-            /* Focus Style (Native Selection) */
             .monaco-image-wrapper:focus {
-                outline: 2px solid #0e639c;
-                outline-offset: 2px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                border-color: #3b82f6; 
+                box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
             }
             .monaco-image-handle {
                 position: absolute;
-                bottom: 5px;
-                right: 5px;
-                width: 10px;
-                height: 10px;
-                background-color: #0e639c;
+                bottom: 6px;
+                right: 6px;
+                width: 12px;
+                height: 12px;
+                background-color: #3b82f6;
                 border: 2px solid white;
                 border-radius: 50%;
                 cursor: nwse-resize;
@@ -503,6 +568,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                 transition: opacity 0.2s, transform 0.1s;
                 z-index: 20;
                 pointer-events: auto;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.2);
             }
             .monaco-image-wrapper:hover .monaco-image-handle,
             .monaco-image-wrapper:focus .monaco-image-handle {

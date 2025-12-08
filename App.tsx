@@ -1,5 +1,4 @@
 
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import Sidebar from './components/Sidebar';
@@ -543,7 +542,7 @@ const App: React.FC = () => {
         const newFile: EditorFile = { 
             id: uuidv4(), 
             name: handle.name, 
-            path: relativePath,
+            path: relativePath, 
             handle, 
             content, 
             isDirty: false, 

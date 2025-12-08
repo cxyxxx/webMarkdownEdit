@@ -486,11 +486,24 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                       e.preventDefault();
                       
                       const rect = wrapper.getBoundingClientRect();
-                      // Simple logic: if click is to the right of image, put cursor at end of line
-                      // if click is to left, put at start
+                      
                       if (e.clientX > rect.right) {
-                          editor.setPosition({ lineNumber: req.lineNumber, column: model.getLineMaxColumn(req.lineNumber) });
+                          // Clicked to the right: move to start of next line
+                          const nextLine = req.lineNumber + 1;
+                          if (nextLine <= model.getLineCount()) {
+                              editor.setPosition({ lineNumber: nextLine, column: 1 });
+                          } else {
+                              // If last line, append newline
+                              const endCol = model.getLineMaxColumn(req.lineNumber);
+                              editor.executeEdits('append-newline', [{
+                                  range: new monacoRef.current!.Range(req.lineNumber, endCol, req.lineNumber, endCol),
+                                  text: '\n',
+                                  forceMoveMarkers: true
+                              }]);
+                              editor.setPosition({ lineNumber: nextLine, column: 1 });
+                          }
                       } else {
+                          // Clicked to the left -> Go to start of current line
                           editor.setPosition({ lineNumber: req.lineNumber, column: 1 });
                       }
                       editor.focus();

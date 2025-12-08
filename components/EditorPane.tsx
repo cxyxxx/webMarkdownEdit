@@ -1,5 +1,4 @@
-
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import Editor, { OnMount } from '@monaco-editor/react';
 import { FileSystemDirectoryHandle } from '../types';
 
@@ -61,7 +60,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
   const viewZoneIds = useRef<string[]>([]);
   const decorationsMap = useRef<string[]>([]);
   const imageCache = useRef<Map<string, string>>(new Map()); // src -> blobUrl
-
+  
   useEffect(() => {
     onPasteImageRef.current = onPasteImage;
   }, [onPasteImage]);
@@ -79,7 +78,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       fontFamily: "'Fira Code', 'Droid Sans Mono', 'monospace', monospace",
       fontSize: 14,
       scrollBeyondLastLine: false,
-      glyphMargin: false, // Cleaner look for image widgets
+      glyphMargin: false,
     });
 
     if (initialCursorPosition) {
@@ -91,38 +90,37 @@ const EditorPane: React.FC<EditorPaneProps> = ({
         if (onCursorChange) {
             onCursorChange(e.position.lineNumber, e.position.column);
         }
-        // Debounce decoration updates slightly to avoid flashing during fast typing
         requestAnimationFrame(() => updateImageDecorations(editor));
     });
 
-    // Link Click Support
+    // Handle Link Click (Ctrl+Click or Double Click)
     editor.onMouseDown((e) => {
-      if (!onFileLinkClick) return;
+        if (!onFileLinkClick) return;
 
-      const isCtrlCmd = e.event.ctrlKey || e.event.metaKey;
-      const isDoubleClick = e.event.browserEvent.detail === 2;
+        const isCtrlCmd = e.event.ctrlKey || e.event.metaKey;
+        const isDoubleClick = e.event.browserEvent.detail === 2;
 
-      if ((isCtrlCmd || isDoubleClick) && e.target.type === monaco.editor.MouseTargetType.CONTENT_TEXT && e.target.position) {
-          const model = editor.getModel();
-          if (!model) return;
-          
-          const position = e.target.position;
-          const lineContent = model.getLineContent(position.lineNumber);
-          
-          const regex = /\[\[([^\]|]+)(\|([^\]]+))?\]\]/g;
-          let match;
-          
-          while ((match = regex.exec(lineContent)) !== null) {
-              const startCol = match.index + 1;
-              const endCol = startCol + match[0].length;
-              
-              if (position.column >= startCol && position.column <= endCol) {
-                  const target = match[1];
-                  setTimeout(() => onFileLinkClick(target), 0);
-                  return;
-              }
-          }
-      }
+        if ((isCtrlCmd || isDoubleClick) && e.target.type === monaco.editor.MouseTargetType.CONTENT_TEXT && e.target.position) {
+            const model = editor.getModel();
+            if (!model) return;
+            
+            const position = e.target.position;
+            const lineContent = model.getLineContent(position.lineNumber);
+            
+            const regex = /\[\[([^\]|]+)(\|([^\]]+))?\]\]/g;
+            let match;
+            
+            while ((match = regex.exec(lineContent)) !== null) {
+                const startCol = match.index + 1;
+                const endCol = startCol + match[0].length;
+                
+                if (position.column >= startCol && position.column <= endCol) {
+                    const target = match[1];
+                    setTimeout(() => onFileLinkClick(target), 0);
+                    return;
+                }
+            }
+        }
     });
 
     // Initialize Image Preview
@@ -132,8 +130,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
   // --- Image Preview Logic (Inline Images in Monaco) ---
 
   const loadImageBlob = async (src: string): Promise<string | null> => {
-      // Basic cleanup for src in case it has quotes or title
-      // e.g. "image.png" or image.png "title"
       let cleanSrc = src.trim();
       const firstSpace = cleanSrc.indexOf(' ');
       if (firstSpace > 0) {
@@ -144,7 +140,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       if (cleanSrc.startsWith('http') || cleanSrc.startsWith('data:')) return cleanSrc;
       if (!rootDirHandle) return null;
       
-      // Cache check
       if (imageCache.current.has(cleanSrc)) return imageCache.current.get(cleanSrc)!;
 
       try {
@@ -173,14 +168,12 @@ const EditorPane: React.FC<EditorPaneProps> = ({
      if (!model) return;
      const cursorLine = editor.getPosition()?.lineNumber;
 
-     // Match ![alt](src)
      const regex = /!\[(.*?)\]\((.*?)\)/g;
      
      const matches: any[] = [];
      const lines = model.getLineCount();
 
      for (let i = 1; i <= lines; i++) {
-         // If cursor is on this line, DO NOT hide the markdown code.
          if (i === cursorLine) continue;
 
          const lineContent = model.getLineContent(i);
@@ -210,32 +203,26 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       const regex = /!\[(.*?)\]\((.*?)\)/g;
       
       const newViewZones: any[] = [];
-      const imageRequests: { lineNumber: number, src: string, alt: string, range: any }[] = [];
+      const imageRequests: { lineNumber: number, src: string, alt: string }[] = [];
 
-      // First pass: scan all lines
       for (let i = 1; i <= lines; i++) {
           const lineContent = model.getLineContent(i);
           let match;
           while ((match = regex.exec(lineContent)) !== null) {
               const alt = match[1];
               const src = match[2];
-              const matchStart = match.index + 1;
-              const matchEnd = matchStart + match[0].length;
-
+              
               imageRequests.push({ 
                 lineNumber: i, 
                 src, 
-                alt,
-                range: new monacoRef.current!.Range(i, matchStart, i, matchEnd) 
+                alt
               });
           }
       }
 
-      // Second pass: Load images and prepare ViewZones
       await Promise.all(imageRequests.map(async (req) => {
           const url = await loadImageBlob(req.src);
           if (url) {
-              // Parse width from alt:  "my-image|200" or "my-image|200x100"
               let widthVal: number | null = null;
               let cleanAlt = req.alt;
               const parts = req.alt.split('|');
@@ -253,21 +240,108 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                   const container = document.createElement('div');
                   container.className = 'monaco-image-widget';
                   
-                  // Wrapper to handle hover and positioning
+                  // Main Wrapper - Focusable for Selection
                   const wrapper = document.createElement('div');
                   wrapper.className = 'monaco-image-wrapper';
+                  wrapper.tabIndex = 0; // Make focusable
                   
+                  // Helper to find current range in case of edits
+                  const getLatestRangeAndText = () => {
+                      const currentModel = editor.getModel();
+                      if (!currentModel) return null;
+                      
+                      try {
+                          const lineContent = currentModel.getLineContent(req.lineNumber);
+                          const regex = /!\[(.*?)\]\((.*?)\)/g;
+                          let m;
+                          while ((m = regex.exec(lineContent)) !== null) {
+                              if (m[2] === req.src) {
+                                  const start = m.index + 1;
+                                  return {
+                                      text: m[0],
+                                      range: new monacoRef.current!.Range(req.lineNumber, start, req.lineNumber, start + m[0].length)
+                                  };
+                              }
+                          }
+                      } catch (e) { /* Line might have been deleted */ }
+                      return null;
+                  };
+
+                  // --- Keyboard Handling (Copy/Cut/Delete/Nav) ---
+                  wrapper.onkeydown = (e) => {
+                      // Only handle if this element is focused
+                      if (document.activeElement !== wrapper) return;
+
+                      const isCmd = e.ctrlKey || e.metaKey;
+                      const key = e.key.toLowerCase();
+
+                      // Navigation Back to Editor
+                      if (key === 'arrowdown') {
+                          e.preventDefault();
+                          editor.focus();
+                          // Move cursor to next line if possible
+                          const nextLine = Math.min(model.getLineCount(), req.lineNumber + 1);
+                          editor.setPosition({ lineNumber: nextLine, column: 1 });
+                      }
+                      if (key === 'arrowup') {
+                          e.preventDefault();
+                          editor.focus();
+                          // Move cursor to previous line (or same line start to reveal code)
+                          const prevLine = Math.max(1, req.lineNumber - 1);
+                          editor.setPosition({ lineNumber: prevLine, column: 1 });
+                      }
+
+                      // Delete
+                      if (e.key === 'Delete' || e.key === 'Backspace') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const info = getLatestRangeAndText();
+                          if (info) {
+                              editor.executeEdits('image-delete', [{ range: info.range, text: "", forceMoveMarkers: true }]);
+                              editor.focus(); // Return focus to editor
+                          }
+                      }
+
+                      // Copy
+                      if (isCmd && key === 'c') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const info = getLatestRangeAndText();
+                          if (info) {
+                              navigator.clipboard.writeText(info.text);
+                          }
+                      }
+
+                      // Cut
+                      if (isCmd && key === 'x') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const info = getLatestRangeAndText();
+                          if (info) {
+                              navigator.clipboard.writeText(info.text);
+                              editor.executeEdits('image-cut', [{ range: info.range, text: "", forceMoveMarkers: true }]);
+                              editor.focus();
+                          }
+                      }
+                  };
+
+                  // Click to focus
+                  wrapper.onclick = (e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      wrapper.focus();
+                  };
+
                   const img = document.createElement('img');
                   img.src = url;
                   img.className = 'monaco-image-element';
                   if (widthVal) {
                       img.style.width = `${widthVal}px`;
                   } else {
-                      img.style.width = 'auto'; // Default 
+                      img.style.width = 'auto'; 
                       img.style.maxWidth = '100%'; 
                   }
                   
-                  // Resize Handle
                   const handle = document.createElement('div');
                   handle.className = 'monaco-image-handle';
                   handle.title = 'Drag to resize';
@@ -279,8 +353,11 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                   // --- Resize Logic ---
                   const handleMouseDown = (e: MouseEvent) => {
                       e.preventDefault();
-                      e.stopPropagation(); // Stop Monaco from stealing the event
+                      e.stopPropagation(); 
                       
+                      // Focus the wrapper on resize start too
+                      wrapper.focus();
+
                       const startX = e.clientX;
                       const startWidth = img.offsetWidth;
                       
@@ -297,42 +374,16 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                           const diff = upEvent.clientX - startX;
                           const finalWidth = Math.max(50, startWidth + diff);
                           
-                          // We need to fetch the LATEST model content because it might have changed
-                          const currentModel = editor.getModel();
-                          if (currentModel) {
-                              const lineContent = currentModel.getLineContent(req.lineNumber);
-                              const lineRegex = /!\[(.*?)\]\((.*?)\)/g;
-                              let m;
-                              let bestMatch = null;
-                              let minDistance = Infinity;
-
-                              // Re-find the exact image match in the line (heuristics for multiple images on line)
-                              while ((m = lineRegex.exec(lineContent)) !== null) {
-                                  const matchStart = m.index + 1;
-                                  const dist = Math.abs(matchStart - req.range.startColumn);
-                                  
-                                  if (m[2] === req.src && dist < minDistance) {
-                                      minDistance = dist;
-                                      bestMatch = m;
-                                  }
-                              }
-
-                              if (bestMatch) {
-                                  const matchStart = bestMatch.index + 1;
-                                  const matchEnd = matchStart + bestMatch[0].length;
-                                  const range = new monacoRef.current!.Range(req.lineNumber, matchStart, req.lineNumber, matchEnd);
-                                  
-                                  // Construct new markdown: ![alt|width](src)
-                                  // Note: if cleanAlt is empty (e.g. ![|100](src)), we preserve that pattern
-                                  const newAlt = `${cleanAlt}|${Math.round(finalWidth)}`;
-                                  const newText = `![${newAlt}](${req.src})`;
-                                  
-                                  editor.executeEdits('image-resize', [{
-                                      range: range,
-                                      text: newText,
-                                      forceMoveMarkers: true
-                                  }]);
-                              }
+                          const info = getLatestRangeAndText();
+                          if (info) {
+                              const newAlt = `${cleanAlt}|${Math.round(finalWidth)}`;
+                              const newText = `![${newAlt}](${req.src})`;
+                              
+                              editor.executeEdits('image-resize', [{
+                                  range: info.range,
+                                  text: newText,
+                                  forceMoveMarkers: true
+                              }]);
                           }
                       };
 
@@ -345,26 +396,17 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                   img.onload = () => {
                       const lineHeight = editor.getOption(monacoRef.current!.editor.EditorOption.lineHeight) || 19;
                       
-                      // Calculate height based on Natural Dimensions and target width.
-                      // This is critical because `img.offsetHeight` is 0 when the element is detached.
                       let renderedHeight = img.naturalHeight;
                       if (widthVal) {
                           renderedHeight = (img.naturalHeight / img.naturalWidth) * widthVal;
                       } else {
-                          // If auto width, we assume it renders at natural width,
-                          // but capped by editor width essentially.
-                          // Since we can't easily get computed width, we estimate using natural.
-                          // A safe clamp to prevent massive viewzones for 4k images.
                           const MAX_AUTO_WIDTH = 800; 
                           if (img.naturalWidth > MAX_AUTO_WIDTH) {
                                renderedHeight = (img.naturalHeight / img.naturalWidth) * MAX_AUTO_WIDTH;
                           }
                       }
                       
-                      // Ensure minimal height to prevent collapse
                       renderedHeight = Math.max(20, renderedHeight);
-
-                      // Add some padding (e.g. 10px top/bottom total)
                       const PADDING = 12; 
                       const heightInLines = Math.ceil((renderedHeight + PADDING) / lineHeight);
 
@@ -382,7 +424,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
           }
       }));
 
-      // Apply changes to ViewZones
       editor.changeViewZones((changeAccessor: any) => {
           viewZoneIds.current.forEach((id) => changeAccessor.removeZone(id));
           viewZoneIds.current = [];
@@ -397,7 +438,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
   };
 
   useEffect(() => {
-      // Debounce logic
       const timer = setTimeout(() => {
           if (editorRef.current) {
               scanAndRenderImages(editorRef.current);
@@ -414,12 +454,14 @@ const EditorPane: React.FC<EditorPaneProps> = ({
           style.id = styleId;
           style.innerHTML = `
             .hidden-image-code {
-                display: none !important; 
-                opacity: 0;
+                color: transparent !important;
+                font-size: 0.1px !important;
+                letter-spacing: -1px !important;
+                /* Avoid display: none to ensure cursor mechanics work, but make it effectively invisible */
             }
             .monaco-image-widget {
                 display: block;
-                margin: 6px 0; /* Vertical margin handled in height calculation */
+                margin: 6px 0;
                 z-index: 10;
                 user-select: none;
             }
@@ -427,16 +469,25 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                 position: relative;
                 display: inline-block;
                 line-height: 0;
-                transition: all 0.2s;
+                transition: all 0.1s;
+                border-radius: 4px;
+                outline: none; /* Default outline removal */
+                cursor: default;
             }
             .monaco-image-element {
                 display: block;
                 border-radius: 4px;
-                cursor: default;
+                cursor: pointer;
                 transition: box-shadow 0.2s;
             }
             .monaco-image-wrapper:hover .monaco-image-element {
-                box-shadow: 0 0 0 2px #0e639c; /* VSCode accent color */
+                box-shadow: 0 0 0 2px #0e639c;
+            }
+            /* Focus Style (Native Selection) */
+            .monaco-image-wrapper:focus {
+                outline: 2px solid #0e639c;
+                outline-offset: 2px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.2);
             }
             .monaco-image-handle {
                 position: absolute;
@@ -453,7 +504,8 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                 z-index: 20;
                 pointer-events: auto;
             }
-            .monaco-image-wrapper:hover .monaco-image-handle {
+            .monaco-image-wrapper:hover .monaco-image-handle,
+            .monaco-image-wrapper:focus .monaco-image-handle {
                 opacity: 1;
             }
             .monaco-image-handle:hover {
@@ -463,7 +515,6 @@ const EditorPane: React.FC<EditorPaneProps> = ({
           document.head.appendChild(style);
       }
   }, []);
-
 
   const handlePasteCapture = useCallback(async (e: React.ClipboardEvent) => {
       if (!onPasteImageRef.current) return;

@@ -62,9 +62,37 @@ const EditorPane: React.FC<EditorPaneProps> = ({
   const decorationsMap = useRef<string[]>([]);
   const imageCache = useRef<Map<string, string>>(new Map()); // src -> blobUrl
   
+  // Track image DOM nodes for selection highlighting
+  const imageWidgets = useRef<{ lineNumber: number, wrapper: HTMLElement }[]>([]);
+
+  // Track the currently dragged image info for 'Move' operations
+  const activeDragImageRef = useRef<{ range: any, text: string } | null>(null);
+  
   useEffect(() => {
     onPasteImageRef.current = onPasteImage;
   }, [onPasteImage]);
+
+  const updateImageSelection = (editor: any) => {
+      if (!editor) return;
+      const selections = editor.getSelections() || [];
+      
+      imageWidgets.current.forEach(widget => {
+            let isSelected = false;
+            for (const sel of selections) {
+                if (!sel.isEmpty()) {
+                    if (sel.startLineNumber <= widget.lineNumber && sel.endLineNumber >= widget.lineNumber) {
+                        isSelected = true;
+                        break;
+                    }
+                }
+            }
+            if (isSelected) {
+                widget.wrapper.classList.add('selected');
+            } else {
+                widget.wrapper.classList.remove('selected');
+            }
+      });
+  };
 
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -78,7 +106,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       padding: { top: 16 },
       fontFamily: "'Fira Code', 'Droid Sans Mono', 'monospace', monospace",
       fontSize: 14,
-      scrollBeyondLastLine: false,
+      scrollBeyondLastLine: true,
       glyphMargin: false,
     });
 
@@ -93,10 +121,65 @@ const EditorPane: React.FC<EditorPaneProps> = ({
         }
     });
 
+    editor.onDidChangeCursorSelection((e) => {
+        updateImageSelection(editor);
+    });
+
     // Automatically hide image source code whenever content changes
     editor.onDidChangeModelContent(() => {
         requestAnimationFrame(() => updateImageDecorations(editor));
     });
+
+    // Drag and Drop Handler for Moving Images
+    const domNode = editor.getDomNode();
+    if (domNode) {
+        domNode.addEventListener('dragover', (e: DragEvent) => {
+            // Allow drop if we are dragging our own image
+            if (activeDragImageRef.current) {
+                e.preventDefault();
+                e.dataTransfer!.dropEffect = 'move';
+            }
+        });
+
+        domNode.addEventListener('drop', (e: DragEvent) => {
+            if (activeDragImageRef.current) {
+                e.preventDefault(); // Stop default text insertion
+                
+                const target = editor.getTargetAtClientPoint(e.clientX, e.clientY);
+                if (target && target.position) {
+                    const { range, text } = activeDragImageRef.current;
+                    
+                    // Prevent dropping onto itself (overlapping range)
+                    if (range.containsPosition(target.position)) {
+                         activeDragImageRef.current = null;
+                         return;
+                    }
+                    
+                    // Perform Move: Delete Source + Insert Target
+                    editor.executeEdits('image-drag-move', [
+                        { range: range, text: "", forceMoveMarkers: true },
+                        { 
+                          range: { 
+                            startLineNumber: target.position.lineNumber, 
+                            startColumn: target.position.column, 
+                            endLineNumber: target.position.lineNumber, 
+                            endColumn: target.position.column 
+                          }, 
+                          text: text, 
+                          forceMoveMarkers: true 
+                        }
+                    ]);
+                    
+                    editor.focus();
+                    editor.setPosition(target.position);
+                    activeDragImageRef.current = null;
+                    
+                    // Trigger immediate rescan to render the image at new location
+                    setTimeout(() => scanAndRenderImages(editor), 10);
+                }
+            }
+        });
+    }
 
     // Handle Link Click (Ctrl+Click or Double Click)
     editor.onMouseDown((e) => {
@@ -209,6 +292,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
       // Store object wrapper { zone, ref } where ref will be populated with ID later
       const newViewZones: { zone: any, ref: { id: string | null } }[] = [];
       const imageRequests: { lineNumber: number, src: string, alt: string, isFirstOnPureLine: boolean }[] = [];
+      const newImageWidgets: { lineNumber: number, wrapper: HTMLElement }[] = [];
 
       for (let i = 1; i <= lines; i++) {
           const lineContent = model.getLineContent(i);
@@ -266,7 +350,10 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                   const wrapper = document.createElement('div');
                   wrapper.className = 'monaco-image-wrapper';
                   wrapper.tabIndex = 0; // Make focusable
+                  wrapper.draggable = true; // Enable Drag
                   
+                  newImageWidgets.push({ lineNumber: req.lineNumber, wrapper });
+
                   // Ref to store zone ID later, used in resize handler
                   const zoneRef = { id: null as string | null };
                   
@@ -299,6 +386,30 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                       } catch (e) { /* Line might have been deleted */ }
                       return null;
                   };
+
+                  // --- Drag and Drop Handling (Source) ---
+                  wrapper.addEventListener('dragstart', (e) => {
+                      const info = getLatestRangeAndText();
+                      if (info) {
+                          // Set the correct markdown text instead of the image URL
+                          e.dataTransfer?.setData('text/plain', info.text);
+                          e.dataTransfer!.effectAllowed = 'copyMove';
+                          
+                          // Track this drag internally to support "Move" operation (delete original)
+                          activeDragImageRef.current = { range: info.range, text: info.text };
+
+                          // Set custom drag image if possible (the img element)
+                          const imgEl = wrapper.querySelector('img');
+                          if (imgEl && e.dataTransfer?.setDragImage) {
+                              e.dataTransfer.setDragImage(imgEl, 0, 0);
+                          }
+                      }
+                  });
+
+                  wrapper.addEventListener('dragend', () => {
+                      // Clear the drag ref after a short delay to allow the drop handler to execute first
+                      setTimeout(() => { activeDragImageRef.current = null; }, 100);
+                  });
 
                   // --- Keyboard Handling (Copy/Cut/Delete/Nav) ---
                   wrapper.onkeydown = (e) => {
@@ -360,8 +471,29 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                       requestAnimationFrame(() => updateImageDecorations(editor));
                   };
                   
+                  // Prevent default selection when clicking on image wrapper
                   wrapper.onmousedown = (e) => {
                       e.stopPropagation(); 
+                  };
+                  
+                  // Custom Click handler to place cursor when clicking outside the image in the widget area
+                  container.onmousedown = (e) => {
+                      // Skip if resizing is active (handled by dataset flag)
+                      if (container.dataset.resizing === "true") return;
+                      // Skip if we clicked the image itself or its handle
+                      if (e.target !== container) return;
+                      
+                      e.preventDefault();
+                      
+                      const rect = wrapper.getBoundingClientRect();
+                      // Simple logic: if click is to the right of image, put cursor at end of line
+                      // if click is to left, put at start
+                      if (e.clientX > rect.right) {
+                          editor.setPosition({ lineNumber: req.lineNumber, column: model.getLineMaxColumn(req.lineNumber) });
+                      } else {
+                          editor.setPosition({ lineNumber: req.lineNumber, column: 1 });
+                      }
+                      editor.focus();
                   };
 
                   const img = document.createElement('img');
@@ -386,6 +518,8 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                       e.preventDefault();
                       e.stopPropagation(); 
                       wrapper.focus();
+                      container.dataset.resizing = "true"; // Mark container as resizing to block cursor clicks
+
                       const startX = e.clientX;
                       const startWidth = img.offsetWidth;
                       const aspectRatio = img.naturalHeight / img.naturalWidth;
@@ -395,6 +529,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                       const PADDING = 12;
                       
                       let animationFrame: number;
+                      let lastLayoutTime = 0; // Throttle timestamp
 
                       const onMouseMove = (moveEvent: MouseEvent) => {
                           if (animationFrame) cancelAnimationFrame(animationFrame);
@@ -402,26 +537,34 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                           animationFrame = requestAnimationFrame(() => {
                               const diff = moveEvent.clientX - startX;
                               const currentW = Math.max(50, startWidth + diff);
+                              
+                              // Update visual width immediately (60fps)
                               img.style.width = `${currentW}px`;
                               
-                              // Real-time Layout Update
+                              // Real-time Layout Update (Throttled)
                               if (zoneRef.id) {
-                                  const renderedHeight = currentW * aspectRatio;
-                                  let heightDeduction = 0;
-                                  
-                                  if (req.isFirstOnPureLine) {
-                                      heightDeduction = lineHeight;
-                                  }
+                                  const now = Date.now();
+                                  // Throttle layout triggers to approx 30fps (32ms) to avoid heavy Monaco layout thrashing
+                                  if (now - lastLayoutTime > 32) {
+                                      const renderedHeight = (img.naturalHeight / img.naturalWidth) * currentW;
+                                      
+                                      let heightDeduction = 0;
+                                      // If it's a pure image line, we are pulling it up by one lineHeight
+                                      if (req.isFirstOnPureLine) {
+                                          heightDeduction = lineHeight;
+                                      }
 
-                                  const heightInLines = Math.max(0.1, (renderedHeight + PADDING - heightDeduction) / lineHeight);
-                                  
-                                  // Update viewZone config object
-                                  viewZone.heightInLines = heightInLines;
-                                  
-                                  // Trigger layout update in Monaco
-                                  editor.changeViewZones((accessor: any) => {
-                                      accessor.layoutZone(zoneRef.id);
-                                  });
+                                      const heightInLines = Math.max(0.1, (renderedHeight + PADDING - heightDeduction) / lineHeight);
+                                      
+                                      // Only update if change is significant (> 0.05 lines) to reduce jitter
+                                      if (Math.abs(viewZone.heightInLines - heightInLines) > 0.05) {
+                                          viewZone.heightInLines = heightInLines;
+                                          editor.changeViewZones((accessor: any) => {
+                                              accessor.layoutZone(zoneRef.id);
+                                          });
+                                          lastLayoutTime = now;
+                                      }
+                                  }
                               }
                           });
                       };
@@ -431,6 +574,8 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                           document.removeEventListener('mouseup', onMouseUp);
                           if (animationFrame) cancelAnimationFrame(animationFrame);
                           
+                          setTimeout(() => { delete container.dataset.resizing; }, 50);
+
                           const diff = upEvent.clientX - startX;
                           const finalWidth = Math.max(50, startWidth + diff);
                           const info = getLatestRangeAndText();
@@ -442,6 +587,16 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                                   text: newText,
                                   forceMoveMarkers: true
                               }]);
+                              
+                              // Force a final layout update to be perfectly precise
+                              if (zoneRef.id) {
+                                  const renderedHeight = (img.naturalHeight / img.naturalWidth) * finalWidth;
+                                  let heightDeduction = req.isFirstOnPureLine ? lineHeight : 0;
+                                  viewZone.heightInLines = Math.max(0.1, (renderedHeight + PADDING - heightDeduction) / lineHeight);
+                                  editor.changeViewZones((accessor: any) => {
+                                      accessor.layoutZone(zoneRef.id);
+                                  });
+                              }
                           }
                       };
                       document.addEventListener('mousemove', onMouseMove);
@@ -502,6 +657,9 @@ const EditorPane: React.FC<EditorPaneProps> = ({
               viewZoneIds.current.push(id);
           });
       });
+
+      imageWidgets.current = newImageWidgets;
+      updateImageSelection(editor);
       
       updateImageDecorations(editor);
   };
@@ -544,6 +702,17 @@ const EditorPane: React.FC<EditorPaneProps> = ({
                 outline: none; 
                 cursor: default;
                 border: 2px solid transparent; 
+            }
+            .monaco-image-wrapper.selected {
+                box-shadow: 0 0 0 2px #3b82f6;
+            }
+            .monaco-image-wrapper.selected::after {
+                content: "";
+                position: absolute;
+                top: 0; left: 0; right: 0; bottom: 0;
+                background-color: rgba(59, 130, 246, 0.2);
+                pointer-events: none;
+                border-radius: 4px;
             }
             .monaco-image-element {
                 display: block;
@@ -688,7 +857,7 @@ const EditorPane: React.FC<EditorPaneProps> = ({
           selectOnLineNumbers: true,
           automaticLayout: true,
           renderWhitespace: 'selection',
-          scrollBeyondLastLine: false,
+          scrollBeyondLastLine: true,
           scrollbar: {
               vertical: 'visible',
               horizontal: 'visible'

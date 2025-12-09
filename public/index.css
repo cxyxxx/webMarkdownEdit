@@ -1,0 +1,11 @@
+/* Base styles for bundled app; keeps Vite warning away */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: #1e1e1e;
+  color: #cccccc;
+}

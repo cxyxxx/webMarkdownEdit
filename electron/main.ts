@@ -1,7 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import isDev from 'electron-is-dev';
 
 // 在 ES 模块中获取 __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -19,6 +18,8 @@ const createWindow = () => {
       preload: path.join(__dirname, 'preload.js')
     }
   });
+
+  const isDev = !app.isPackaged;
 
   const startUrl = isDev
     ? 'http://localhost:5173'

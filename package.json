@@ -5,31 +5,57 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "npm run build:electron-main && vite build && electron-builder",
+    "preview": "vite preview",
+    "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron-build": "npm run build",
+    "build:electron-main": "esbuild electron/main.ts --platform=node --target=node20 --format=esm --outfile=public/electron.js"
   },
   "dependencies": {
-    "react": "^19.2.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@tiptap/core": "^3.13.0",
+    "@tiptap/extension-horizontal-rule": "^3.13.0",
+    "@tiptap/extension-image": "2.3.2",
+    "@tiptap/extension-link": "2.3.2",
+    "@tiptap/extension-placeholder": "2.3.2",
+    "@tiptap/pm": "2.3.2",
+    "@tiptap/react": "2.3.2",
+    "@tiptap/starter-kit": "2.3.2",
     "lucide-react": "^0.556.0",
+    "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
-    "uuid": "^13.0.0",
-    "remark-math": "^6.0.0",
-    "@monaco-editor/react": "^4.7.0",
     "remark-gfm": "^4.0.1",
-    "@tiptap/core": "2.2.4",
-    "@tiptap/react": "2.2.4",
-    "@tiptap/starter-kit": "2.2.4",
-    "@tiptap/extension-image": "2.2.4",
-    "@tiptap/extension-link": "2.2.4",
-    "@tiptap/extension-placeholder": "2.2.4",
-    "tiptap-markdown": "0.8.10"
+    "remark-math": "^6.0.0",
+    "tiptap-markdown": "0.8.10",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.2.1",
+    "electron": "^32.2.8",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "install": "^0.13.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "wait-on": "^9.0.3"
+  },
+  "homepage": "./",
+  "main": "public/electron.js",
+  "build": {
+    "appId": "com.markdownpro.app",
+    "files": [
+      "dist/**/*",
+      "public/electron.js"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
   }
 }
